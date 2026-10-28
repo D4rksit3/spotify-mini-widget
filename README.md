@@ -1,5 +1,7 @@
 # Spotify mini
 
+![Widget con la letra abierta](docs/captura.png)
+
 Widget pequeño para Linux que se queda **siempre encima** de las demás ventanas y muestra lo que suena en Spotify:
 
 - carátula, canción y artista

@@ -546,7 +546,10 @@ class Widget(Gtk.Window):
             return False
         kind, data = result
         if kind == "error":
-            self._set_content(self.lyrics_box, self._hint("No se pudo buscar la letra: " + data))
+            # LRCLIB se satura a ratos: reintenta en silencio mientras siga la misma canción
+            self._set_content(self.lyrics_box, self._hint("LRCLIB está ocupado, reintentando…"))
+            GLib.timeout_add_seconds(8, lambda: self.lyrics_box.get_visible()
+                                     and track_id == self.track_id and self._load_lyrics() and False)
             return False
         if kind == "instrumental":
             self._set_content(self.lyrics_box, self._hint("♪ Instrumental"))
