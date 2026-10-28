@@ -467,6 +467,7 @@ class Widget(Gtk.Window):
 
         self.seeking = False
         self.saved = False
+        self.heart_checked_at = 0
         self.volume_set_at = 0
         self.unmuted_volume = 1.0
         self.shuffle = False
@@ -619,6 +620,9 @@ class Widget(Gtk.Window):
         """Mueve la barra de progreso. Corre solo mientras los controles están abiertos."""
         if not self.extra_box.get_visible():
             return False
+        # re-chequea el corazón por si se marcó desde la app de Spotify o el login llegó tarde
+        if time.time() - self.heart_checked_at > 10:
+            self._update_heart()
         if self.running and not self.seeking:
             try:
                 pos = self.conn.call_sync(
@@ -702,6 +706,7 @@ class Widget(Gtk.Window):
         self.heart_btn.set_tooltip_text(tip or ("Quitar de tus Me gusta" if saved else "Guardar en tus Me gusta"))
 
     def _update_heart(self):
+        self.heart_checked_at = time.time()
         uri = self._track_uri()
         self.heart_btn.set_sensitive(bool(uri))
         if not uri:
