@@ -40,7 +40,8 @@ PATH = "/org/mpris/MediaPlayer2"
 IFACE = "org.mpris.MediaPlayer2.Player"
 
 REDIRECT = "http://127.0.0.1:8898/callback"
-SCOPE = "user-read-playback-state user-read-currently-playing"
+SCOPE = "user-read-playback-state user-read-currently-playing user-library-read user-library-modify"
+DJ_URI = "spotify:playlist:37i9dQZF1EYkqdzj48dyYq"  # lista especial que arranca el DJ de Spotify
 ART = 56
 THUMB = 32
 MAX_QUEUE = 10
@@ -157,7 +158,10 @@ class SpotifyAPI:
         self.token = load_json(TOKEN, None)
 
     def authorized(self):
-        return bool(self.token and self.token.get("refresh_token"))
+        """Hay sesión y tiene todos los permisos actuales (si se agregan, pide reconectar)."""
+        if not (self.token and self.token.get("refresh_token")):
+            return False
+        return set(SCOPE.split()) <= set(self.token.get("scope", "").split())
 
     def logout(self):
         self.token = None
@@ -226,6 +230,7 @@ class SpotifyAPI:
             "access_token": data["access_token"],
             "refresh_token": data.get("refresh_token", old_refresh),
             "expires_at": time.time() + data.get("expires_in", 3600) - 60,
+            "scope": data.get("scope", (self.token or {}).get("scope", "")),
         }
         save_json(TOKEN, self.token, private=True)
 
@@ -256,6 +261,23 @@ class SpotifyAPI:
             image = images[-1]["url"] if images else None
             items.append((it.get("name", "?"), who, image))
         return items
+
+    def _library(self, method, uri):
+        req = urllib.request.Request(
+            "https://api.spotify.com/v1/me/library" + ("/contains" if method == "GET" else "")
+            + "?" + urllib.parse.urlencode({"uris": uri}),
+            method=method,
+            headers={"Authorization": "Bearer " + self._access_token()},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            body = r.read()
+        return json.loads(body) if body else None
+
+    def is_saved(self, uri):
+        return bool((self._library("GET", uri) or [False])[0])
+
+    def set_saved(self, uri, saved):
+        self._library("PUT" if saved else "DELETE", uri)
 
 
 class Widget(Gtk.Window):
@@ -432,6 +454,11 @@ class Widget(Gtk.Window):
         self.vol_scale.connect("value-changed", self._on_volume)
         vol.pack_start(self.vol_btn, False, False, 0)
         vol.pack_start(self.vol_scale, False, False, 0)
+        self.dj_btn = self._button("audio-input-microphone-symbolic", "Poner el DJ de Spotify",
+                                   lambda *_: self._open_uri(DJ_URI))
+        self.heart_btn = self._button("emblem-favorite-symbolic", "Guardar en tus Me gusta", self._toggle_heart)
+        toggles.pack_start(self.dj_btn, False, False, 0)
+        toggles.pack_start(self.heart_btn, False, False, 0)
         toggles.pack_start(vol, False, False, 0)
         box.pack_start(toggles, False, False, 0)
         # el panel usa no_show_all, así que su contenido se muestra aquí una vez
@@ -439,6 +466,7 @@ class Widget(Gtk.Window):
             child.show_all()
 
         self.seeking = False
+        self.saved = False
         self.volume_set_at = 0
         self.unmuted_volume = 1.0
         self.shuffle = False
@@ -528,6 +556,8 @@ class Widget(Gtk.Window):
             self._load_art(meta.get("mpris:artUrl"))
             if self.queue_box.get_visible():
                 GLib.timeout_add(900, lambda: self._load_queue() and False)
+            if self.extra_box.get_visible():
+                self._update_heart()
         return True
 
     def _load_art(self, url):
@@ -580,6 +610,7 @@ class Widget(Gtk.Window):
         self.more_btn.get_image().set_from_icon_name(
             "pan-up-symbolic" if opening else "pan-down-symbolic", Gtk.IconSize.BUTTON)
         if opening:
+            self._update_heart()
             self._tick_extra()
             GLib.timeout_add(500, self._tick_extra)
         self.resize(1, 1)
@@ -649,6 +680,66 @@ class Widget(Gtk.Window):
             icon = "audio-volume-high-symbolic"
         self.vol_btn.get_image().set_from_icon_name(icon, Gtk.IconSize.BUTTON)
         self.vol_btn.set_tooltip_text("Volumen {:.0f} % (clic: silenciar)".format(value * 100))
+
+    def _open_uri(self, uri):
+        if self.running:
+            self.conn.call(BUS, PATH, IFACE, "OpenUri", GLib.Variant("(s)", (uri,)),
+                           None, Gio.DBusCallFlags.NONE, 2000, None, None, None)
+
+    def _track_uri(self):
+        # solo canciones; los cortes de voz del DJ y los anuncios no se pueden guardar
+        prefix = "/com/spotify/track/"
+        if self.track_id and self.track_id.startswith(prefix):
+            return "spotify:track:" + self.track_id[len(prefix):]
+        return None
+
+    def _paint_heart(self, saved, tip=None):
+        self.saved = saved
+        ctx = self.heart_btn.get_style_context()
+        ctx.add_class("on") if saved else ctx.remove_class("on")
+        icon = "heart-filled-symbolic" if saved else "emblem-favorite-symbolic"
+        self.heart_btn.get_image().set_from_icon_name(icon, Gtk.IconSize.BUTTON)
+        self.heart_btn.set_tooltip_text(tip or ("Quitar de tus Me gusta" if saved else "Guardar en tus Me gusta"))
+
+    def _update_heart(self):
+        uri = self._track_uri()
+        self.heart_btn.set_sensitive(bool(uri))
+        if not uri:
+            self._paint_heart(False, "Esto no se puede guardar")
+            return
+        if not (self.api and self.api.authorized()):
+            self._paint_heart(False, "Clic para conectar tu cuenta de Spotify")
+            return
+
+        def work():
+            try:
+                saved = self.api.is_saved(uri)
+            except Exception:
+                return
+            GLib.idle_add(lambda: uri == self._track_uri() and self._paint_heart(saved) and False)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _toggle_heart(self, *_):
+        uri = self._track_uri()
+        if not uri:
+            return
+        if not self.api:
+            self._paint_heart(False, "Configura tu Client ID para usar Me gusta")
+            return
+        if not self.api.authorized():
+            self._login(None)
+            return
+        want = not self.saved
+        self._paint_heart(want)  # optimista; se corrige si falla
+
+        def work():
+            try:
+                self.api.set_saved(uri, want)
+            except Exception as e:
+                GLib.idle_add(lambda: self._paint_heart(not want, "No se pudo guardar: " + str(e)) and False)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _cycle_repeat(self, *_):
         nxt = {"None": "Playlist", "Playlist": "Track"}.get(self.loop, "None")
@@ -867,17 +958,26 @@ class Widget(Gtk.Window):
             GLib.timeout_add(350, step)
 
     def _login(self, btn):
-        btn.set_sensitive(False)
-        btn.set_label("Autoriza en el navegador…")
+        if btn:
+            btn.set_sensitive(False)
+            btn.set_label("Autoriza en el navegador…")
+        else:
+            self.heart_btn.set_tooltip_text("Autoriza en el navegador…")
 
         def work():
             try:
                 self.api.login()
-                GLib.idle_add(self._load_queue)
+                GLib.idle_add(self._after_login)
             except Exception as e:
                 GLib.idle_add(self._show_queue, [], str(e))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _after_login(self):
+        if self.queue_box.get_visible():
+            self._load_queue()
+        self._update_heart()
+        return False
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ Widget pequeño para Linux que se queda **siempre encima** de las demás ventana
 
 - carátula, canción y artista
 - anterior / reproducir-pausa / siguiente
-- flechita **⌄** que despliega la barra de progreso (clic o arrastre para adelantar/retroceder), **aleatorio**, **repetir** (lista → canción → no) y **volumen** (clic en el altavoz para silenciar); cerrada no ocupa espacio
+- flechita **⌄** que despliega la barra de progreso (clic o arrastre para adelantar/retroceder), **aleatorio**, **repetir** (lista → canción → no) **volumen** (clic en el altavoz para silenciar), botón 🎙 para poner el **DJ de Spotify** y ❤️ para guardar la canción en tus *Me gusta*; cerrada no ocupa espacio
 - botón de **letra**: sincronizada con la canción (resalta y centra la línea que suena) cuando existe, o texto completo si no
 - botón **≡** con las próximas 10 canciones (con su carátula); clic en una para saltar a ella
 
@@ -54,6 +54,8 @@ Spotify no expone la cola al escritorio, solo por su Web API, así que hace falt
    ```
 
 4. Reabre el widget, pulsa **≡** → **Conectar con Spotify** y autoriza en el navegador.
+
+Con la cuenta conectada también funciona el ❤️ (*Me gusta*). Si una versión nueva pide más permisos, el widget vuelve a mostrar *Conectar con Spotify* una vez.
 
 El inicio de sesión usa PKCE; el token se guarda en `~/.config/spotify-widget/token.json` con permisos `600`.
 
