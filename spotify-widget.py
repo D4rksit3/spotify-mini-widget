@@ -423,12 +423,24 @@ class Widget(Gtk.Window):
         self.repeat_btn = self._button("media-playlist-repeat-symbolic", "Repetir", self._cycle_repeat)
         toggles.pack_start(self.shuffle_btn, False, False, 0)
         toggles.pack_start(self.repeat_btn, False, False, 0)
+
+        vol = Gtk.Box(spacing=2)
+        self.vol_btn = self._button("audio-volume-high-symbolic", "Silenciar", self._toggle_mute)
+        self.vol_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1, 0.05)
+        self.vol_scale.set_draw_value(False)
+        self.vol_scale.set_size_request(90, -1)
+        self.vol_scale.connect("value-changed", self._on_volume)
+        vol.pack_start(self.vol_btn, False, False, 0)
+        vol.pack_start(self.vol_scale, False, False, 0)
+        toggles.pack_start(vol, False, False, 0)
         box.pack_start(toggles, False, False, 0)
         # el panel usa no_show_all, así que su contenido se muestra aquí una vez
         for child in box.get_children():
             child.show_all()
 
         self.seeking = False
+        self.volume_set_at = 0
+        self.unmuted_volume = 1.0
         self.shuffle = False
         self.loop = "None"
         self.length = 0
@@ -491,6 +503,12 @@ class Widget(Gtk.Window):
         self.shuffle = bool(props.get("Shuffle"))
         self.loop = props.get("LoopStatus") or "None"
         self._paint_toggles()
+        # no pisar el deslizador mientras el usuario lo mueve
+        if "Volume" in props and time.time() - self.volume_set_at > 1.5:
+            self.vol_scale.handler_block_by_func(self._on_volume)
+            self.vol_scale.set_value(props["Volume"])
+            self.vol_scale.handler_unblock_by_func(self._on_volume)
+            self._paint_volume(props["Volume"])
 
         meta = props.get("Metadata") or {}
         length = (meta.get("mpris:length") or 0) / 1e6
@@ -605,6 +623,32 @@ class Widget(Gtk.Window):
                            GLib.Variant("(ssv)", (IFACE, name, value)),
                            None, Gio.DBusCallFlags.NONE, 2000, None, None, None)
             GLib.timeout_add(400, lambda: self.refresh() and False)
+
+    def _on_volume(self, scale):
+        self.volume_set_at = time.time()
+        value = scale.get_value()
+        if value > 0:
+            self.unmuted_volume = value
+        self._paint_volume(value)
+        if self.running:
+            self.conn.call(BUS, PATH, "org.freedesktop.DBus.Properties", "Set",
+                           GLib.Variant("(ssv)", (IFACE, "Volume", GLib.Variant("d", value))),
+                           None, Gio.DBusCallFlags.NONE, 2000, None, None, None)
+
+    def _toggle_mute(self, *_):
+        self.vol_scale.set_value(0 if self.vol_scale.get_value() > 0 else self.unmuted_volume or 1.0)
+
+    def _paint_volume(self, value):
+        if value <= 0:
+            icon = "audio-volume-muted-symbolic"
+        elif value < 0.34:
+            icon = "audio-volume-low-symbolic"
+        elif value < 0.67:
+            icon = "audio-volume-medium-symbolic"
+        else:
+            icon = "audio-volume-high-symbolic"
+        self.vol_btn.get_image().set_from_icon_name(icon, Gtk.IconSize.BUTTON)
+        self.vol_btn.set_tooltip_text("Volumen {:.0f} % (clic: silenciar)".format(value * 100))
 
     def _cycle_repeat(self, *_):
         nxt = {"None": "Playlist", "Playlist": "Track"}.get(self.loop, "None")
