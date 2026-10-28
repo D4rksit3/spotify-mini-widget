@@ -6,6 +6,7 @@ Widget pequeño para Linux que se queda **siempre encima** de las demás ventana
 
 - carátula, canción y artista
 - anterior / reproducir-pausa / siguiente
+- flechita **⌄** que despliega la barra de progreso (clic o arrastre para adelantar/retroceder), **aleatorio** y **repetir** (lista → canción → no); cerrada no ocupa espacio
 - botón de **letra**: sincronizada con la canción (resalta y centra la línea que suena) cuando existe, o texto completo si no
 - botón **≡** con las próximas 10 canciones (con su carátula); clic en una para saltar a ella
 

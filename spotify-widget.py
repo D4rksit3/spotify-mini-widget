@@ -65,7 +65,20 @@ window { background-color: transparent; }
 .lyric { color: #6f6f6f; font-size: 10pt; padding: 3px 4px; }
 .lyric.past { color: #a7a7a7; }
 .lyric.now { color: #ffffff; font-weight: bold; }
+.time { color: #a7a7a7; font-size: 8pt; }
+.card button.on { color: #1db954; }
+.card button.more { min-width: 16px; padding: 3px 0; }
+.card scale { padding: 6px 0; }
+.card scale trough { min-height: 4px; border-radius: 2px; border: none; background-color: rgba(255, 255, 255, 0.15); }
+.card scale highlight { border-radius: 2px; border: none; background-color: #1db954; }
+.card scale slider { min-width: 10px; min-height: 10px; margin: -3px 0; border-radius: 5px; border: none;
+                     box-shadow: none; background-color: #ffffff; }
 """
+
+def fmt_time(seconds):
+    m, s = divmod(int(seconds), 60)
+    return "{}:{:02d}".format(m, s)
+
 
 LRC_TAG = re.compile(r"\[(\d+):(\d+(?:\.\d+)?)\]")
 
@@ -350,8 +363,8 @@ class Widget(Gtk.Window):
         self.artist.get_style_context().add_class("artist")
         for lbl in (self.title, self.artist):
             lbl.set_ellipsize(Pango.EllipsizeMode.END)
-            lbl.set_max_width_chars(18)
-            lbl.set_width_chars(18)
+            lbl.set_max_width_chars(16)
+            lbl.set_width_chars(16)
             text.pack_start(lbl, False, False, 0)
         row.pack_start(text, True, True, 0)
 
@@ -366,6 +379,13 @@ class Widget(Gtk.Window):
                                     lambda *_: self._toggle_panel(self.lyrics_box)), False, False, 0)
         row.pack_start(self._button("view-list-symbolic", "A continuación",
                                     lambda *_: self._toggle_panel(self.queue_box)), False, False, 0)
+        self.more_btn = self._button("pan-down-symbolic", "Más controles", self._toggle_extra, "more")
+        row.pack_start(self.more_btn, False, False, 0)
+
+        # barra de progreso, aleatorio y repetir: oculto hasta pulsar la flechita
+        self.extra_box = self._build_extra()
+        self.extra_box.set_no_show_all(True)
+        outer.pack_start(self.extra_box, False, False, 0)
 
         # paneles desplegables: solo uno abierto a la vez
         self.lyrics_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -376,6 +396,43 @@ class Widget(Gtk.Window):
 
         self.show_all()
         self._set_idle()
+
+    def _build_extra(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+
+        seek = Gtk.Box(spacing=6)
+        self.pos_lbl = Gtk.Label(label="0:00")
+        self.len_lbl = Gtk.Label(label="0:00")
+        self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1, 1)
+        self.scale.set_draw_value(False)
+        self.scale.connect("button-press-event", self._on_seek_press)
+        self.scale.connect("button-release-event", self._on_seek_release)
+        self.scale.connect("value-changed", self._on_seek_move)
+        seek.pack_start(self.pos_lbl, False, False, 0)
+        seek.pack_start(self.scale, True, True, 0)
+        seek.pack_start(self.len_lbl, False, False, 0)
+        for lbl in (self.pos_lbl, self.len_lbl):
+            lbl.get_style_context().add_class("time")
+            lbl.set_width_chars(5)
+        box.pack_start(seek, False, False, 0)
+
+        toggles = Gtk.Box(spacing=16)
+        toggles.set_halign(Gtk.Align.CENTER)
+        self.shuffle_btn = self._button("media-playlist-shuffle-symbolic", "Aleatorio",
+                                        lambda *_: self._set_prop("Shuffle", GLib.Variant("b", not self.shuffle)))
+        self.repeat_btn = self._button("media-playlist-repeat-symbolic", "Repetir", self._cycle_repeat)
+        toggles.pack_start(self.shuffle_btn, False, False, 0)
+        toggles.pack_start(self.repeat_btn, False, False, 0)
+        box.pack_start(toggles, False, False, 0)
+        # el panel usa no_show_all, así que su contenido se muestra aquí una vez
+        for child in box.get_children():
+            child.show_all()
+
+        self.seeking = False
+        self.shuffle = False
+        self.loop = "None"
+        self.length = 0
+        return box
 
     def _on_press(self, widget, event):
         if event.button == 1 and event.type == Gdk.EventType.BUTTON_PRESS:
@@ -431,7 +488,16 @@ class Widget(Gtk.Window):
         icon = "media-playback-pause-symbolic" if playing else "media-playback-start-symbolic"
         self.play_btn.get_image().set_from_icon_name(icon, Gtk.IconSize.BUTTON)
 
+        self.shuffle = bool(props.get("Shuffle"))
+        self.loop = props.get("LoopStatus") or "None"
+        self._paint_toggles()
+
         meta = props.get("Metadata") or {}
+        length = (meta.get("mpris:length") or 0) / 1e6
+        if length != self.length:
+            self.length = length
+            self.scale.set_range(0, max(length, 1))
+            self.len_lbl.set_text(fmt_time(length))
         track_id = meta.get("mpris:trackid")
         if track_id and track_id != self.track_id:
             self.track_id = track_id
@@ -488,6 +554,71 @@ class Widget(Gtk.Window):
             return False
 
         threading.Thread(target=work, daemon=True).start()
+
+    # ---------- controles extra ----------
+    def _toggle_extra(self, *_):
+        opening = not self.extra_box.get_visible()
+        self.extra_box.set_visible(opening)
+        self.more_btn.get_image().set_from_icon_name(
+            "pan-up-symbolic" if opening else "pan-down-symbolic", Gtk.IconSize.BUTTON)
+        if opening:
+            self._tick_extra()
+            GLib.timeout_add(500, self._tick_extra)
+        self.resize(1, 1)
+
+    def _tick_extra(self):
+        """Mueve la barra de progreso. Corre solo mientras los controles están abiertos."""
+        if not self.extra_box.get_visible():
+            return False
+        if self.running and not self.seeking:
+            try:
+                pos = self.conn.call_sync(
+                    BUS, PATH, "org.freedesktop.DBus.Properties", "Get",
+                    GLib.Variant("(ss)", (IFACE, "Position")), None,
+                    Gio.DBusCallFlags.NONE, 500, None).unpack()[0] / 1e6
+            except GLib.Error:
+                return True
+            self.scale.set_value(pos)
+            self.pos_lbl.set_text(fmt_time(pos))
+        return True
+
+    def _on_seek_press(self, *_):
+        self.seeking = True
+        return False
+
+    def _on_seek_move(self, scale):
+        if self.seeking:
+            self.pos_lbl.set_text(fmt_time(scale.get_value()))
+
+    def _on_seek_release(self, scale, _event):
+        if self.running and self.track_id:
+            self.conn.call(BUS, PATH, IFACE, "SetPosition",
+                           GLib.Variant("(ox)", (self.track_id, int(scale.get_value() * 1e6))),
+                           None, Gio.DBusCallFlags.NONE, 2000, None, None, None)
+        # deja que Spotify aplique el salto antes de volver a leer la posición
+        GLib.timeout_add(700, lambda: setattr(self, "seeking", False))
+        return False
+
+    def _set_prop(self, name, value):
+        if self.running:
+            self.conn.call(BUS, PATH, "org.freedesktop.DBus.Properties", "Set",
+                           GLib.Variant("(ssv)", (IFACE, name, value)),
+                           None, Gio.DBusCallFlags.NONE, 2000, None, None, None)
+            GLib.timeout_add(400, lambda: self.refresh() and False)
+
+    def _cycle_repeat(self, *_):
+        nxt = {"None": "Playlist", "Playlist": "Track"}.get(self.loop, "None")
+        self._set_prop("LoopStatus", GLib.Variant("s", nxt))
+
+    def _paint_toggles(self):
+        for btn, on in ((self.shuffle_btn, self.shuffle), (self.repeat_btn, self.loop != "None")):
+            ctx = btn.get_style_context()
+            ctx.add_class("on") if on else ctx.remove_class("on")
+        icon = "media-playlist-repeat-song-symbolic" if self.loop == "Track" else "media-playlist-repeat-symbolic"
+        self.repeat_btn.get_image().set_from_icon_name(icon, Gtk.IconSize.BUTTON)
+        self.repeat_btn.set_tooltip_text({"None": "Repetir: no", "Playlist": "Repetir: lista",
+                                          "Track": "Repetir: canción"}[self.loop])
+        self.shuffle_btn.set_tooltip_text("Aleatorio: " + ("sí" if self.shuffle else "no"))
 
     # ---------- paneles ----------
     def _toggle_panel(self, panel):
