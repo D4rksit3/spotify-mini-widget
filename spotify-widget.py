@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""Mini widget de Spotify siempre encima: carátula, canción, controles y cola (máx. 10).
+"""Mini widget de Spotify siempre encima: carátula, canción, controles, letra y cola (máx. 10).
 
 - Arrastrar con clic izquierdo para moverlo (recuerda la posición).
 - Clic derecho: menú para cerrar o desconectar la cuenta.
+- La letra sale de LRCLIB (lrclib.net), sincronizada cuando existe.
 - La cola usa la Web API de Spotify: pon tu Client ID en ~/.config/spotify-widget/config.json
 """
 import base64
 import hashlib
 import json
 import os
+import re
 import secrets
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -41,6 +44,8 @@ SCOPE = "user-read-playback-state user-read-currently-playing"
 ART = 56
 THUMB = 32
 MAX_QUEUE = 10
+LYRICS_HEIGHT = 190
+USER_AGENT = "spotify-mini-widget (https://github.com/D4rksit3/spotify-mini-widget)"
 
 CSS = b"""
 window { background-color: transparent; }
@@ -56,7 +61,64 @@ window { background-color: transparent; }
 .queue row { padding: 4px 6px; border-radius: 6px; color: #dddddd; font-size: 9pt; }
 .queue row:hover { background-color: rgba(255, 255, 255, 0.08); }
 .hint { color: #a7a7a7; font-size: 9pt; }
+.lyrics, .lyrics viewport { background-color: transparent; }
+.lyric { color: #6f6f6f; font-size: 10pt; padding: 3px 4px; }
+.lyric.past { color: #a7a7a7; }
+.lyric.now { color: #ffffff; font-weight: bold; }
 """
+
+LRC_TAG = re.compile(r"\[(\d+):(\d+(?:\.\d+)?)\]")
+
+
+def fetch_lyrics(title, artist, album, seconds):
+    """Busca la letra en LRCLIB. Devuelve ("synced", [(seg, línea)]), ("plain", texto),
+    ("instrumental", None) o None si no hay."""
+
+    def get(endpoint, params):
+        req = urllib.request.Request(
+            "https://lrclib.net/api/" + endpoint + "?" + urllib.parse.urlencode(params),
+            headers={"User-Agent": USER_AGENT},
+        )
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return json.load(r)
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    return None
+                if e.code < 500 or attempt == 2:
+                    raise
+            except urllib.error.URLError:
+                if attempt == 2:
+                    raise
+            time.sleep(1 + attempt)  # LRCLIB a veces devuelve 503 pasajeros
+
+    params = {"track_name": title, "artist_name": artist}
+    if album:
+        params["album_name"] = album
+    if seconds:
+        params["duration"] = round(seconds)
+    hit = get("get", params)
+    if not hit:
+        # sin coincidencia exacta: la primera de la búsqueda que tenga letra
+        results = get("search", {"track_name": title, "artist_name": artist}) or []
+        hit = next((r for r in results if r.get("syncedLyrics") or r.get("plainLyrics")), None)
+    if not hit:
+        return None
+    if hit.get("instrumental"):
+        return ("instrumental", None)
+    if hit.get("syncedLyrics"):
+        lines = []
+        for raw in hit["syncedLyrics"].splitlines():
+            tags = LRC_TAG.findall(raw)
+            text = LRC_TAG.sub("", raw).strip()
+            for m, s in tags:
+                lines.append((int(m) * 60 + float(s), text))
+        if lines:
+            return ("synced", sorted(lines))
+    if hit.get("plainLyrics"):
+        return ("plain", hit["plainLyrics"])
+    return None
 
 
 def load_json(path, default):
@@ -197,6 +259,12 @@ class Widget(Gtk.Window):
         self.track_id = None
         self.art_url = None
         self.art_cache = {}
+        self.meta = {}
+        self.lyrics_cache = {}
+        self.lyric_labels = []
+        self.lyric_times = []
+        self.lyric_idx = -1
+        self.lyrics_scroller = None
         self.save_pos_id = 0
 
         self._setup_window()
@@ -282,8 +350,8 @@ class Widget(Gtk.Window):
         self.artist.get_style_context().add_class("artist")
         for lbl in (self.title, self.artist):
             lbl.set_ellipsize(Pango.EllipsizeMode.END)
-            lbl.set_max_width_chars(20)
-            lbl.set_width_chars(20)
+            lbl.set_max_width_chars(18)
+            lbl.set_width_chars(18)
             text.pack_start(lbl, False, False, 0)
         row.pack_start(text, True, True, 0)
 
@@ -294,12 +362,17 @@ class Widget(Gtk.Window):
         row.pack_start(self.play_btn, False, False, 0)
         row.pack_start(self._button("media-skip-forward-symbolic", "Siguiente",
                                     lambda *_: self._call("Next")), False, False, 0)
+        row.pack_start(self._button("media-view-subtitles-symbolic", "Letra",
+                                    lambda *_: self._toggle_panel(self.lyrics_box)), False, False, 0)
         row.pack_start(self._button("view-list-symbolic", "A continuación",
-                                    self._toggle_queue), False, False, 0)
+                                    lambda *_: self._toggle_panel(self.queue_box)), False, False, 0)
 
+        # paneles desplegables: solo uno abierto a la vez
+        self.lyrics_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.queue_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.queue_box.set_no_show_all(True)
-        outer.pack_start(self.queue_box, False, False, 0)
+        for box in (self.lyrics_box, self.queue_box):
+            box.set_no_show_all(True)
+            outer.pack_start(box, False, False, 0)
 
         self.show_all()
         self._set_idle()
@@ -339,6 +412,7 @@ class Widget(Gtk.Window):
     def _set_idle(self):
         self.track_id = None
         self.art_url = None
+        self.meta = {}
         self.title.set_text("Spotify no está abierto")
         self.artist.set_text("")
         self.cover.set_from_icon_name("audio-x-generic", Gtk.IconSize.DIALOG)
@@ -361,6 +435,9 @@ class Widget(Gtk.Window):
         track_id = meta.get("mpris:trackid")
         if track_id and track_id != self.track_id:
             self.track_id = track_id
+            self.meta = meta
+            if self.lyrics_box.get_visible():
+                self._load_lyrics()
             self.title.set_text(meta.get("xesam:title") or "—")
             self.artist.set_text(", ".join(meta.get("xesam:artist") or []))
             self.title.set_tooltip_text(self.title.get_text())
@@ -412,21 +489,136 @@ class Widget(Gtk.Window):
 
         threading.Thread(target=work, daemon=True).start()
 
-    # ---------- cola ----------
-    def _toggle_queue(self, *_):
-        if self.queue_box.get_visible():
-            self.queue_box.hide()
-            self.resize(1, 1)
-        else:
-            self.queue_box.show()
-            self._load_queue()
+    # ---------- paneles ----------
+    def _toggle_panel(self, panel):
+        opening = not panel.get_visible()
+        for box in (self.lyrics_box, self.queue_box):
+            box.hide()
+        if opening:
+            panel.show()
+            if panel is self.lyrics_box:
+                self._load_lyrics()
+                GLib.timeout_add(250, self._tick_lyrics)
+            else:
+                self._load_queue()
+        self.resize(1, 1)
 
-    def _set_queue_content(self, widget):
-        for child in self.queue_box.get_children():
-            self.queue_box.remove(child)
-        self.queue_box.pack_start(widget, False, False, 0)
+    def _set_content(self, box, widget):
+        for child in box.get_children():
+            box.remove(child)
+        box.pack_start(widget, False, False, 0)
         widget.show_all()
         self.resize(1, 1)
+
+    # ---------- letra ----------
+    def _load_lyrics(self):
+        self.lyric_labels, self.lyric_times, self.lyric_idx = [], [], -1
+        track_id, meta = self.track_id, self.meta
+        if not track_id:
+            self._set_content(self.lyrics_box, self._hint("No está sonando nada."))
+            return
+        if track_id in self.lyrics_cache:
+            self._show_lyrics(track_id, self.lyrics_cache[track_id])
+            return
+        self._set_content(self.lyrics_box, self._hint("Buscando letra…"))
+
+        def work():
+            try:
+                result = fetch_lyrics(
+                    meta.get("xesam:title") or "",
+                    (meta.get("xesam:artist") or [""])[0],
+                    meta.get("xesam:album") or "",
+                    (meta.get("mpris:length") or 0) / 1e6,
+                )
+            except Exception as e:  # red caída, LRCLIB fuera de servicio, etc.
+                result = ("error", str(e))
+            GLib.idle_add(self._show_lyrics, track_id, result)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_lyrics(self, track_id, result):
+        if result is None or result[0] != "error":
+            self.lyrics_cache[track_id] = result
+        if track_id != self.track_id or not self.lyrics_box.get_visible():
+            return False
+        if result is None:
+            self._set_content(self.lyrics_box, self._hint("No encontré la letra de esta canción."))
+            return False
+        kind, data = result
+        if kind == "error":
+            self._set_content(self.lyrics_box, self._hint("No se pudo buscar la letra: " + data))
+            return False
+        if kind == "instrumental":
+            self._set_content(self.lyrics_box, self._hint("♪ Instrumental"))
+            return False
+
+        lines = data if kind == "synced" else [(None, t) for t in data.splitlines()]
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        labels = []
+        for _, text in lines:
+            lbl = Gtk.Label(label=text or "♪")
+            lbl.set_line_wrap(True)
+            lbl.set_max_width_chars(34)
+            lbl.set_justify(Gtk.Justification.CENTER)
+            lbl.get_style_context().add_class("lyric")
+            vbox.pack_start(lbl, False, False, 0)
+            labels.append(lbl)
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_size_request(-1, LYRICS_HEIGHT)
+        scroller.get_style_context().add_class("lyrics")
+        scroller.add(vbox)
+        self.lyrics_scroller = scroller
+        if kind == "synced":
+            self.lyric_labels = labels
+            self.lyric_times = [t for t, _ in lines]
+        else:  # sin tiempos: todo en blanco y se desplaza a mano
+            for lbl in labels:
+                lbl.get_style_context().add_class("now")
+        self._set_content(self.lyrics_box, scroller)
+        return False
+
+    def _tick_lyrics(self):
+        """Resalta la línea que suena y la centra. Corre solo mientras el panel está abierto."""
+        if not self.lyrics_box.get_visible():
+            return False
+        if not (self.running and self.lyric_labels):
+            return True
+        try:
+            pos = self.conn.call_sync(
+                BUS, PATH, "org.freedesktop.DBus.Properties", "Get",
+                GLib.Variant("(ss)", (IFACE, "Position")), None,
+                Gio.DBusCallFlags.NONE, 500, None).unpack()[0] / 1e6
+        except GLib.Error:
+            return True
+
+        idx = -1
+        for i, t in enumerate(self.lyric_times):
+            if t > pos:
+                break
+            idx = i
+        if idx == self.lyric_idx:
+            return True
+        self.lyric_idx = idx
+        for i, lbl in enumerate(self.lyric_labels):
+            ctx = lbl.get_style_context()
+            ctx.remove_class("now")
+            ctx.remove_class("past")
+            if i == idx:
+                ctx.add_class("now")
+            elif i < idx:
+                ctx.add_class("past")
+        if idx >= 0:
+            alloc = self.lyric_labels[idx].get_allocation()
+            adj = self.lyrics_scroller.get_vadjustment()
+            target = alloc.y + alloc.height / 2 - adj.get_page_size() / 2
+            adj.set_value(max(adj.get_lower(), min(target, adj.get_upper() - adj.get_page_size())))
+        return True
+
+    # ---------- cola ----------
+    def _set_queue_content(self, widget):
+        self._set_content(self.queue_box, widget)
 
     def _hint(self, text):
         lbl = Gtk.Label(label=text, xalign=0)

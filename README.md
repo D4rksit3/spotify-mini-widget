@@ -4,6 +4,7 @@ Widget pequeño para Linux que se queda **siempre encima** de las demás ventana
 
 - carátula, canción y artista
 - anterior / reproducir-pausa / siguiente
+- botón de **letra**: sincronizada con la canción (resalta y centra la línea que suena) cuando existe, o texto completo si no
 - botón **≡** con las próximas 10 canciones (con su carátula); clic en una para saltar a ella
 
 Hecho con Python + GTK 3. Probado en Ubuntu 26.04 con GNOME (Wayland) y el Spotify de escritorio.
@@ -33,6 +34,10 @@ Luego ábrelo desde el menú de aplicaciones buscando **Spotify mini**. Para qui
 - **Mover:** arrastra con clic izquierdo (recuerda la posición).
 - **Cerrar:** clic derecho → *Cerrar widget*. Se vuelve a abrir desde el menú de aplicaciones.
 
+## Letras
+
+Salen de [LRCLIB](https://lrclib.net), una base de letras abierta y gratuita; no requiere cuenta ni configuración. El widget le envía título, artista, álbum y duración de la canción que suena para buscarla.
+
 ## Ver la cola (opcional)
 
 Spotify no expone la cola al escritorio, solo por su Web API, así que hace falta una app de desarrollador propia:
@@ -52,7 +57,7 @@ El inicio de sesión usa PKCE; el token se guarda en `~/.config/spotify-widget/t
 ## Notas
 
 - En Wayland el widget corre como ventana X11 (Xwayland): es la única forma de que GNOME respete "siempre encima".
-- Sin Client ID funciona todo menos la cola.
+- Sin Client ID funciona todo menos la cola (las letras no lo necesitan).
 
 ## Licencia
 
