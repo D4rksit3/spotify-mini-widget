@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Spotify mini
+Comment=Widget de Spotify siempre encima
+Exec=python3 @BIN@
+Icon=audio-x-generic
+Terminal=false
+Categories=AudioVideo;Audio;
